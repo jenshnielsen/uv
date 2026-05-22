@@ -4305,6 +4305,49 @@ fn install_upgrade_strategy_preview_default() {
     );
 }
 
+/// `UV_UPGRADE_STRATEGY` should drive the strategy, equivalent to pip's `PIP_UPGRADE_STRATEGY`.
+#[test]
+fn install_upgrade_strategy_env_var() {
+    let context = uv_test::test_context!("3.12");
+
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // With `UV_UPGRADE_STRATEGY=only-if-needed`, `idna` should stay at 3.4.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio")
+        .arg("--upgrade")
+        .env(EnvVars::UV_UPGRADE_STRATEGY, "only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 1 package in [TIME]
+    Uninstalled 1 package in [TIME]
+    Installed 1 package in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+    "
+    );
+}
+
 /// Install a package from a `requirements.txt` file, with a `constraints.txt` file.
 #[test]
 fn install_constraints_txt() -> Result<()> {

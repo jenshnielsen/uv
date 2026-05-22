@@ -2517,7 +2517,12 @@ pub struct PipInstallArgs {
     ///
     /// When unset, the default is `eager`, unless the `upgrade-strategy` preview feature is
     /// enabled, in which case the default becomes `only-if-needed` to match pip.
-    #[arg(long, value_enum, help_heading = "Resolver options")]
+    #[arg(
+        long,
+        value_enum,
+        env = EnvVars::UV_UPGRADE_STRATEGY,
+        help_heading = "Resolver options"
+    )]
     pub upgrade_strategy: Option<UpgradeStrategy>,
 
     #[command(flatten)]

@@ -1332,6 +1332,11 @@ impl EnvVars {
     #[attr_added_in("0.6.9")]
     pub const UV_TORCH_BACKEND: &'static str = "UV_TORCH_BACKEND";
 
+    /// Equivalent to the `--upgrade-strategy` command-line argument for `uv pip install` (e.g.,
+    /// `eager` or `only-if-needed`). Mirrors pip's `PIP_UPGRADE_STRATEGY`.
+    #[attr_added_in("0.11.17")]
+    pub const UV_UPGRADE_STRATEGY: &'static str = "UV_UPGRADE_STRATEGY";
+
     /// Equivalent to the `--project` command-line argument.
     #[attr_added_in("0.4.4")]
     pub const UV_PROJECT: &'static str = "UV_PROJECT";

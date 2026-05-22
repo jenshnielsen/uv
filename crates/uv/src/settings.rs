@@ -19,7 +19,8 @@ use uv_cli::{
     PipSyncArgs, PipTreeArgs, PipUninstallArgs, PythonFindArgs, PythonInstallArgs, PythonListArgs,
     PythonListFormat, PythonPinArgs, PythonUninstallArgs, PythonUpgradeArgs, RemoveArgs, RunArgs,
     SyncArgs, SyncFormat, ToolDirArgs, ToolInstallArgs, ToolListArgs, ToolRunArgs,
-    ToolUninstallArgs, TreeArgs, VenvArgs, VersionArgs, VersionBumpSpec, VersionFormat,
+    ToolUninstallArgs, TreeArgs, UpgradeStrategy, VenvArgs, VersionArgs, VersionBumpSpec,
+    VersionFormat,
 };
 use uv_cli::{
     AuthorFrom, BuildArgs, ExportArgs, FormatArgs, PublishArgs, PythonDirArgs,
@@ -3183,6 +3184,7 @@ pub(crate) struct PipInstallSettings {
     pub(crate) build_constraints_from_workspace: Vec<Requirement>,
     pub(crate) modifications: Modifications,
     pub(crate) refresh: Refresh,
+    pub(crate) upgrade_strategy: Option<UpgradeStrategy>,
     pub(crate) settings: PipSettings,
 }
 
@@ -3233,6 +3235,7 @@ impl PipInstallSettings {
             no_strict,
             dry_run,
             torch_backend,
+            upgrade_strategy,
             compat_args: _,
         } = args;
 
@@ -3323,6 +3326,7 @@ impl PipInstallSettings {
                 None
             },
             refresh: Refresh::from(refresh),
+            upgrade_strategy,
             settings: PipSettings::combine(
                 PipOptions {
                     python: python.and_then(Maybe::into_option),

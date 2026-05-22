@@ -911,6 +911,24 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
                 }
             }
 
+            // Apply `--upgrade-strategy only-if-needed`: when set, an `--upgrade` (i.e., upgrade
+            // all) is restricted to the directly-requested packages, matching pip's default
+            // behavior. The strategy is explicit when the user passes `--upgrade-strategy`;
+            // otherwise we default to `only-if-needed` when the `upgrade-strategy` preview
+            // feature is enabled, and `eager` in stable mode. The actual narrowing is applied
+            // inside `pip_install` after the requirements have been read, so that packages
+            // listed in `-r requirements.txt`, `pyproject.toml`, etc. are also treated as
+            // direct upgrade targets.
+            let upgrade_strategy = args.upgrade_strategy.unwrap_or_else(|| {
+                if globals.preview.is_enabled(PreviewFeature::UpgradeStrategy) {
+                    uv_cli::UpgradeStrategy::OnlyIfNeeded
+                } else {
+                    uv_cli::UpgradeStrategy::Eager
+                }
+            });
+            let upgrade_only_if_needed =
+                matches!(upgrade_strategy, uv_cli::UpgradeStrategy::OnlyIfNeeded);
+
             // Check for conflicts between offline and refresh.
             globals
                 .network_settings
@@ -940,6 +958,7 @@ async fn run(cli: Cli) -> Result<ExitStatus> {
                 args.settings.prerelease,
                 args.settings.dependency_mode,
                 args.settings.upgrade,
+                upgrade_only_if_needed,
                 args.settings.index_locations,
                 args.settings.index_strategy,
                 args.settings.torch_backend,

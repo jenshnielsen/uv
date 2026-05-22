@@ -20,7 +20,7 @@ use uv_distribution::LoweredExtraBuildDependencies;
 use uv_distribution_types::{
     ConfigSettings, DependencyMetadata, ExtraBuildVariables, Index, IndexLocations,
     NameRequirementSpecification, Origin, PackageConfigSettings, Requirement, Resolution,
-    UnresolvedRequirementSpecification,
+    UnresolvedRequirement, UnresolvedRequirementSpecification,
 };
 use uv_fs::Simplified;
 use uv_install_wheel::LinkMode;
@@ -92,6 +92,7 @@ pub(crate) async fn pip_install(
     prerelease_mode: PrereleaseMode,
     dependency_mode: DependencyMode,
     upgrade: Upgrade,
+    upgrade_only_if_needed: bool,
     index_locations: IndexLocations,
     index_strategy: IndexStrategy,
     torch_backend: Option<TorchMode>,
@@ -161,6 +162,22 @@ pub(crate) async fn pip_install(
         &client_builder,
     )
     .await?;
+
+    // Apply `--upgrade-strategy only-if-needed` after reading requirements so that packages
+    // listed in `-r requirements.txt`, `pyproject.toml`, etc. are also treated as direct
+    // upgrade targets, matching pip's semantics.
+    let upgrade = if upgrade_only_if_needed && upgrade.is_all() {
+        let named_packages: Vec<PackageName> = requirements
+            .iter()
+            .filter_map(|spec| match &spec.requirement {
+                UnresolvedRequirement::Named(req) => Some(req.name.clone()),
+                UnresolvedRequirement::Unnamed(_) => None,
+            })
+            .collect();
+        upgrade.into_only_if_needed(&named_packages)
+    } else {
+        upgrade
+    };
 
     if pylock.is_some() {
         if !preview.is_enabled(PreviewFeature::Pylock) {

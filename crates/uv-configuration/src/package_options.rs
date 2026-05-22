@@ -202,16 +202,16 @@ impl Upgrade {
 
         let mut constraints: FxHashMap<PackageName, Vec<Requirement>> = FxHashMap::default();
         for requirement in upgrade_package {
-            // Skip any "empty" constraints.
+            let entry = constraints.entry(requirement.name.clone()).or_default();
+            // Skip any "empty" constraints. We still record the package name (via the
+            // `entry` above) so that callers can distinguish explicit `--upgrade-package`
+            // targets from packages with no upgrade preference.
             if let RequirementSource::Registry { specifier, .. } = &requirement.source {
                 if specifier.is_empty() {
                     continue;
                 }
             }
-            constraints
-                .entry(requirement.name.clone())
-                .or_default()
-                .push(requirement);
+            entry.push(requirement);
         }
 
         Some(Self {
@@ -254,6 +254,27 @@ impl Upgrade {
         match &self.strategy {
             UpgradeStrategy::Some(packages, _) => Some(packages),
             _ => None,
+        }
+    }
+
+    /// Restrict an "upgrade all" strategy to only the given packages, matching pip's
+    /// `--upgrade-strategy only-if-needed` semantics.
+    ///
+    /// If the current strategy is [`UpgradeStrategy::All`], it is downgraded to
+    /// [`UpgradeStrategy::Some`] containing the provided package names as well as any
+    /// packages already named via `--upgrade-package` (i.e. tracked in `constraints`),
+    /// so that explicit upgrade targets are preserved. Other variants are left unchanged.
+    #[must_use]
+    pub fn into_only_if_needed(self, packages: &[PackageName]) -> Self {
+        if matches!(self.strategy, UpgradeStrategy::All) {
+            let mut combined: FxHashSet<PackageName> = packages.iter().cloned().collect();
+            combined.extend(self.constraints.keys().cloned());
+            Self {
+                strategy: UpgradeStrategy::Some(combined, FxHashSet::default()),
+                constraints: self.constraints,
+            }
+        } else {
+            self
         }
     }
 

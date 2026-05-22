@@ -3979,6 +3979,147 @@ fn install_upgrade() {
     );
 }
 
+/// `--upgrade-strategy only-if-needed` should only upgrade the named packages and leave the
+/// other installed dependencies untouched (as long as they still satisfy the requirements).
+#[test]
+fn install_upgrade_strategy_only_if_needed() {
+    let context = uv_test::test_context!("3.12");
+
+    // Install an old version of `anyio` (which pulls in `idna` and `sniffio`).
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // Upgrade `anyio` with `--upgrade-strategy only-if-needed`. `idna` should stay at 3.4 since
+    // the new `anyio` still accepts it.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio")
+        .arg("--upgrade")
+        .arg("--upgrade-strategy")
+        .arg("only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 1 package in [TIME]
+    Uninstalled 1 package in [TIME]
+    Installed 1 package in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+    "
+    );
+}
+
+/// `--upgrade-strategy eager` matches the existing default behavior of `--upgrade`.
+#[test]
+fn install_upgrade_strategy_eager() {
+    let context = uv_test::test_context!("3.12");
+
+    // Install an old version of `anyio` and `idna`.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // Upgrade `anyio` with `--upgrade-strategy eager`. `idna` is also upgraded because all
+    // dependencies are considered.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio")
+        .arg("--upgrade")
+        .arg("--upgrade-strategy")
+        .arg("eager"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Uninstalled 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+     - idna==3.4
+     + idna==3.6
+    "
+    );
+}
+
+/// With the `upgrade-strategy` preview feature enabled, the default strategy flips to
+/// `only-if-needed` to match pip's default behavior.
+#[test]
+fn install_upgrade_strategy_preview_default() {
+    let context = uv_test::test_context!("3.12");
+
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // Without `--upgrade-strategy` but with the preview feature enabled, `--upgrade` defaults
+    // to only-if-needed: `idna` stays at 3.4.
+    uv_snapshot!(context.pip_install()
+        .arg("--preview-features")
+        .arg("upgrade-strategy")
+        .arg("anyio")
+        .arg("--upgrade"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 1 package in [TIME]
+    Uninstalled 1 package in [TIME]
+    Installed 1 package in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+    "
+    );
+}
+
 /// Install a package from a `requirements.txt` file, with a `constraints.txt` file.
 #[test]
 fn install_constraints_txt() -> Result<()> {

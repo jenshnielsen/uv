@@ -261,6 +261,7 @@ pub enum PreviewFeature {
     CentralizedProjectEnvs = 1 << 35,
     ToolInstallLocks = 1 << 36,
     WorkspaceListScripts = 1 << 37,
+    UpgradeStrategy = 1 << 38,
 }
 
 impl PreviewFeature {
@@ -305,6 +306,7 @@ impl PreviewFeature {
             Self::CentralizedProjectEnvs => "centralized-project-envs",
             Self::ToolInstallLocks => "tool-install-locks",
             Self::WorkspaceListScripts => "workspace-list-scripts",
+            Self::UpgradeStrategy => "upgrade-strategy",
         }
     }
 }
@@ -362,6 +364,7 @@ impl FromStr for PreviewFeature {
             "centralized-project-envs" => Self::CentralizedProjectEnvs,
             "tool-install-locks" => Self::ToolInstallLocks,
             "workspace-list-scripts" => Self::WorkspaceListScripts,
+            "upgrade-strategy" => Self::UpgradeStrategy,
             _ => return Err(PreviewFeatureParseError),
         })
     }
@@ -668,6 +671,7 @@ mod tests {
             PreviewFeature::WorkspaceListScripts.as_str(),
             "workspace-list-scripts"
         );
+        assert_eq!(PreviewFeature::UpgradeStrategy.as_str(), "upgrade-strategy");
     }
 
     #[test]

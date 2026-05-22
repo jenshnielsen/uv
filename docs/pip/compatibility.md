@@ -265,6 +265,26 @@ When uv resolutions differ from `pip` in undesirable ways, it's often a sign tha
 too loose, and that the user should consider tightening them. For example, in the case of
 `starlette` and `fastapi`, the user could require `fastapi>=0.110.0`.
 
+## Upgrade strategy
+
+By default, `uv pip install --upgrade` upgrades every installed package that is part of the
+resolution to its latest compatible version, equivalent to `pip install --upgrade --upgrade-strategy
+eager`. `pip`, in contrast, defaults to `--upgrade-strategy only-if-needed`, in which transitive
+dependencies are only upgraded when required by the new version of a directly-requested package.
+
+`uv pip install` accepts `--upgrade-strategy {eager,only-if-needed}` (and the corresponding
+`UV_UPGRADE_STRATEGY` environment variable) to match `pip`'s flag and `PIP_UPGRADE_STRATEGY`
+environment variable. When `--upgrade-strategy only-if-needed` is used together with `--upgrade`,
+the upgrade set is restricted to the packages named directly on the command line or in a
+`-r requirements.txt` file (plus anything passed via `--upgrade-package`), matching `pip`'s
+behavior. Local source trees (e.g. `uv pip install .`) are not themselves part of the upgrade set,
+but their transitive dependencies are still upgraded when the new resolution requires it.
+
+The eager default is preserved for backward compatibility. To opt in to `pip`'s `only-if-needed`
+default without passing the flag on every invocation, enable the `upgrade-strategy` preview
+feature, e.g., `--preview-features upgrade-strategy`. An explicit `--upgrade-strategy` value
+always wins over both the preview default and the stable default.
+
 ## `pip check`
 
 At present, `uv pip check` will surface the following diagnostics:

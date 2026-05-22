@@ -21,11 +21,12 @@ use uv_distribution::LoweredExtraBuildDependencies;
 use uv_distribution_types::{
     ConfigSettings, DependencyMetadata, ExtraBuildVariables, Index, IndexLocations,
     NameRequirementSpecification, Origin, PackageConfigSettings, Requirement, Resolution,
+    UnresolvedRequirement,
 };
 use uv_fs::Simplified;
 use uv_install_wheel::LinkMode;
 use uv_installer::{InstallationStrategy, SatisfiesResult, SitePackages};
-use uv_normalize::{DefaultExtras, DefaultGroups};
+use uv_normalize::{DefaultExtras, DefaultGroups, PackageName};
 use uv_pep440::Version;
 use uv_preview::{Preview, PreviewFeature};
 use uv_pypi_types::Conflicts;
@@ -93,6 +94,7 @@ pub(crate) async fn pip_install(
     prerelease_mode: PrereleaseMode,
     dependency_mode: DependencyMode,
     upgrade: Upgrade,
+    upgrade_only_if_needed: bool,
     index_locations: IndexLocations,
     index_strategy: IndexStrategy,
     torch_backend: Option<TorchMode>,
@@ -167,6 +169,24 @@ pub(crate) async fn pip_install(
     .await?;
 
     override_dependencies.extend(overrides_from_workspace);
+
+    // Apply `--upgrade-strategy only-if-needed` after reading requirements so that named
+    // packages listed in `-r requirements.txt` are also treated as direct upgrade targets,
+    // matching pip's semantics. Local source trees (e.g. `.`, `./pkg`) and other unnamed
+    // requirements are not added to the upgrade set — the resolver will still upgrade their
+    // transitive dependencies if a new requirement forces it.
+    let upgrade = if upgrade_only_if_needed && upgrade.is_all() {
+        let named_packages: Vec<PackageName> = requirements
+            .iter()
+            .filter_map(|spec| match &spec.requirement {
+                UnresolvedRequirement::Named(req) => Some(req.name.clone()),
+                UnresolvedRequirement::Unnamed(_) => None,
+            })
+            .collect();
+        upgrade.into_only_if_needed(&named_packages)
+    } else {
+        upgrade
+    };
 
     if pylock.is_some() {
         if !preview.is_enabled(PreviewFeature::Pylock) {

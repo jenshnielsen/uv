@@ -91,6 +91,19 @@ pub enum ListFormat {
     Json,
 }
 
+/// The strategy to use when upgrading packages.
+///
+/// Mirrors pip's `--upgrade-strategy`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum UpgradeStrategy {
+    /// Upgrade dependencies regardless of whether the currently installed version satisfies
+    /// the requirements of the upgraded package(s).
+    Eager,
+    /// Only upgrade dependencies if they do not satisfy the requirements of the upgraded
+    /// package(s); matches pip's default behavior.
+    OnlyIfNeeded,
+}
+
 fn extra_name_with_clap_error(arg: &str) -> Result<ExtraName> {
     ExtraName::from_str(arg).map_err(|_err| {
         anyhow!(
@@ -2485,6 +2498,27 @@ pub struct PipInstallArgs {
     /// This option is in preview and may change in any future release.
     #[arg(long, value_enum, env = EnvVars::UV_TORCH_BACKEND)]
     pub torch_backend: Option<TorchMode>,
+
+    /// Determines how dependency upgrading should be handled.
+    ///
+    /// `eager` upgrades dependencies regardless of whether the currently installed version
+    /// satisfies the requirements of the upgraded package(s).
+    ///
+    /// `only-if-needed` only upgrades dependencies when they do not satisfy the requirements of
+    /// the upgraded package(s). This matches pip's default behavior.
+    ///
+    /// Only applies when `--upgrade` is also provided. The upgrade set is restricted to
+    /// directly-requested named packages — i.e., positional arguments, `--upgrade-package`
+    /// targets, and named entries in a requirements file (`-r requirements.txt`). Local
+    /// source trees (e.g., `.`, `./pkg`, or `pyproject.toml` / `setup.py` paths) and other
+    /// unnamed requirements specified by URL or path are not included in the upgrade set;
+    /// the resolver will still upgrade their transitive dependencies if required to satisfy
+    /// a new requirement.
+    ///
+    /// When unset, the default is `eager`, unless the `upgrade-strategy` preview feature is
+    /// enabled, in which case the default becomes `only-if-needed` to match pip.
+    #[arg(long, value_enum, help_heading = "Resolver options")]
+    pub upgrade_strategy: Option<UpgradeStrategy>,
 
     #[command(flatten)]
     pub compat_args: compat::PipInstallCompatArgs,

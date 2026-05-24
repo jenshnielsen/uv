@@ -4348,6 +4348,232 @@ fn install_upgrade_strategy_env_var() {
     );
 }
 
+/// `--upgrade-strategy only-if-needed` must still upgrade a transitive dependency when the new
+/// version of the named package requires it (because the installed version no longer satisfies
+/// the new requirement). This mirrors pip's behavior.
+#[test]
+fn install_upgrade_strategy_only_if_needed_transitive() {
+    let context = uv_test::test_context!("3.12");
+
+    // Install old versions: `httpx==0.23.3` requires `httpcore<0.17.0`, so the resolver picks
+    // `httpcore==0.16.3`.
+    uv_snapshot!(context.pip_install()
+        .arg("httpx==0.23.3")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 8 packages in [TIME]
+    Prepared 8 packages in [TIME]
+    Installed 8 packages in [TIME]
+     + anyio==4.3.0
+     + certifi==2024.2.2
+     + h11==0.14.0
+     + httpcore==0.16.3
+     + httpx==0.23.3
+     + idna==3.6
+     + rfc3986==1.5.0
+     + sniffio==1.3.1
+    "
+    );
+
+    // Upgrade only `httpx` with `--upgrade-strategy only-if-needed`. The new `httpx` requires a
+    // newer `httpcore`, so `httpcore` must also be upgraded even though it is not in the
+    // explicit upgrade set. Other dependencies (e.g., `anyio`, `idna`) that still satisfy the
+    // new requirements should stay at their installed versions.
+    uv_snapshot!(context.pip_install()
+        .arg("httpx")
+        .arg("--upgrade")
+        .arg("--upgrade-strategy")
+        .arg("only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 7 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Uninstalled 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     - httpcore==0.16.3
+     + httpcore==1.0.4
+     - httpx==0.23.3
+     + httpx==0.27.0
+    "
+    );
+}
+
+/// `--upgrade-strategy only-if-needed` should preserve packages explicitly named via
+/// `--upgrade-package` even when they aren't part of the positional CLI arguments. They are
+/// already-named upgrade targets and must not be silently dropped from the upgrade set.
+#[test]
+fn install_upgrade_strategy_only_if_needed_with_upgrade_package() {
+    let context = uv_test::test_context!("3.12");
+
+    // Install old versions of `anyio` and `idna`.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // `--upgrade-strategy only-if-needed` together with `--upgrade-package idna` should still
+    // upgrade `idna` because it was explicitly named for upgrade, even though `anyio` is the only
+    // positional requirement.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio")
+        .arg("--upgrade")
+        .arg("--upgrade-package")
+        .arg("idna")
+        .arg("--upgrade-strategy")
+        .arg("only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 2 packages in [TIME]
+    Uninstalled 2 packages in [TIME]
+    Installed 2 packages in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+     - idna==3.4
+     + idna==3.6
+    "
+    );
+}
+
+/// `--upgrade-strategy only-if-needed` should treat packages listed in a `requirements.txt`
+/// file as direct upgrade targets, matching pip's behavior.
+#[test]
+fn install_upgrade_strategy_only_if_needed_requirements_file() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    // Install an old version of `anyio` (which pulls in `idna` and `sniffio`).
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // Request an upgrade of `anyio` via a `requirements.txt` file. With
+    // `--upgrade-strategy only-if-needed`, `anyio` should be upgraded (because it is a direct
+    // requirement, even though it was provided via `-r`), while `idna` stays at 3.4.
+    let requirements_txt = context.temp_dir.child("requirements.txt");
+    requirements_txt.write_str("anyio")?;
+
+    uv_snapshot!(context.pip_install()
+        .arg("-r")
+        .arg("requirements.txt")
+        .arg("--upgrade")
+        .arg("--upgrade-strategy")
+        .arg("only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 1 package in [TIME]
+    Uninstalled 1 package in [TIME]
+    Installed 1 package in [TIME]
+     - anyio==3.6.2
+     + anyio==4.3.0
+    "
+    );
+
+    Ok(())
+}
+
+/// `--upgrade-strategy only-if-needed` with a local source tree (`pip install .`): the project
+/// itself is not a "named" positional, so its dependencies are not in the upgrade set. Transitive
+/// dependencies that still satisfy the new requirements should stay at their installed versions.
+#[test]
+fn install_upgrade_strategy_only_if_needed_source_tree() -> Result<()> {
+    let context = uv_test::test_context!("3.12");
+
+    let pyproject_toml = context.temp_dir.child("pyproject.toml");
+    pyproject_toml.write_str(indoc! {r#"
+        [project]
+        name = "demo"
+        version = "0.1.0"
+        requires-python = ">=3.12"
+        dependencies = ["anyio"]
+
+        [build-system]
+        requires = ["setuptools"]
+        build-backend = "setuptools.build_meta"
+    "#})?;
+
+    // Install old versions of `anyio` and `idna`.
+    uv_snapshot!(context.pip_install()
+        .arg("anyio==3.6.2")
+        .arg("idna==3.4")
+        .arg("--strict"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 3 packages in [TIME]
+    Prepared 3 packages in [TIME]
+    Installed 3 packages in [TIME]
+     + anyio==3.6.2
+     + idna==3.4
+     + sniffio==1.3.1
+    "
+    );
+
+    // Install the local project with `--upgrade --upgrade-strategy only-if-needed`. The
+    // project's dependency on `anyio` is satisfied by the installed `anyio==3.6.2`, and `idna`
+    // is satisfied by `idna==3.4`, so neither should be upgraded.
+    uv_snapshot!(context.filters(), context.pip_install()
+        .arg(".")
+        .arg("--upgrade")
+        .arg("--upgrade-strategy")
+        .arg("only-if-needed"), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    Resolved 4 packages in [TIME]
+    Prepared 1 package in [TIME]
+    Installed 1 package in [TIME]
+     + demo==0.1.0 (from file://[TEMP_DIR]/)
+    "
+    );
+
+    Ok(())
+}
+
 /// Install a package from a `requirements.txt` file, with a `constraints.txt` file.
 #[test]
 fn install_constraints_txt() -> Result<()> {

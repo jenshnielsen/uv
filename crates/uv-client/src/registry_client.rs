@@ -22,7 +22,7 @@ use uv_configuration::KeyringProviderType;
 use uv_distribution_filename::{DistFilename, SourceDistFilename, WheelFilename};
 use uv_distribution_types::{
     BuiltDist, File, IndexCapabilities, IndexFormat, IndexLocations, IndexMetadataRef,
-    IndexStatusCodeDecision, IndexStatusCodeStrategy, IndexUrl, IndexUrls, Name,
+    IndexStatusCodeDecision, IndexStatusCodeStrategy, IndexUrl, Name,
 };
 use uv_git::{GIT_LFS, GitError, GitHttpSettings, GitResolver, Reporter};
 use uv_metadata::{read_metadata_async_seek, read_metadata_async_stream};
@@ -136,15 +136,15 @@ impl<'a> RegistryClientBuilder<'a> {
     /// leakage to untrusted domains.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn allow_cross_origin_credentials(mut self) -> Self {
+    fn allow_cross_origin_credentials(mut self) -> Self {
         self.base_client_builder = self.base_client_builder.allow_cross_origin_credentials();
         self
     }
 
     /// Add all authenticated sources to the cache.
-    fn cache_index_credentials(&mut self) {
+    fn cache_index_credentials(&mut self) -> Result<(), ClientBuildError> {
         for index in self.index_locations.known_indexes() {
-            if let Some(credentials) = index.credentials() {
+            if let Some(credentials) = index.credentials()? {
                 trace!(
                     "Read credentials for index {}",
                     index
@@ -161,18 +161,33 @@ impl<'a> RegistryClientBuilder<'a> {
                     .store_credentials(index.raw_url(), credentials);
             }
         }
+        Ok(())
     }
 
-    pub fn build(mut self) -> Result<RegistryClient, ClientBuildError> {
-        self.cache_index_credentials();
-        let index_urls = self.index_locations.index_urls();
+    pub fn build(self) -> Result<RegistryClient, ClientBuildError> {
+        self.build_inner(None)
+    }
 
-        // Build a base client
+    /// Share the underlying client between two different middleware configurations.
+    pub fn wrap_existing(self, existing: &BaseClient) -> Result<RegistryClient, ClientBuildError> {
+        self.build_inner(Some(existing))
+    }
+
+    fn build_inner(
+        mut self,
+        existing: Option<&BaseClient>,
+    ) -> Result<RegistryClient, ClientBuildError> {
+        self.cache_index_credentials()?;
+
+        // Wrap in any relevant middleware and handle connectivity.
         let builder = self
             .base_client_builder
             .indexes(Indexes::from(&self.index_locations));
-
-        let client = builder.build()?;
+        let client = if let Some(existing) = existing {
+            builder.wrap_existing(existing)
+        } else {
+            builder.build()?
+        };
 
         let read_timeout = client.read_timeout();
         let connectivity = client.connectivity();
@@ -181,7 +196,7 @@ impl<'a> RegistryClientBuilder<'a> {
         let client = CachedClient::new(client);
 
         Ok(RegistryClient {
-            index_urls,
+            indexes: self.index_locations,
             index_strategy: self.index_strategy,
             torch_backend: self.torch_backend,
             cache: self.cache,
@@ -192,43 +207,13 @@ impl<'a> RegistryClientBuilder<'a> {
             pyx_token_store: PyxTokenStore::from_settings().ok(),
         })
     }
-
-    /// Share the underlying client between two different middleware configurations.
-    pub fn wrap_existing(mut self, existing: &BaseClient) -> RegistryClient {
-        self.cache_index_credentials();
-        let index_urls = self.index_locations.index_urls();
-
-        // Wrap in any relevant middleware and handle connectivity.
-        let client = self
-            .base_client_builder
-            .indexes(Indexes::from(&self.index_locations))
-            .wrap_existing(existing);
-
-        let read_timeout = client.read_timeout();
-        let connectivity = client.connectivity();
-
-        // Wrap in the cache middleware.
-        let client = CachedClient::new(client);
-
-        RegistryClient {
-            index_urls,
-            index_strategy: self.index_strategy,
-            torch_backend: self.torch_backend,
-            cache: self.cache,
-            connectivity,
-            client,
-            read_timeout,
-            flat_indexes: Arc::default(),
-            pyx_token_store: PyxTokenStore::from_settings().ok(),
-        }
-    }
 }
 
 /// A client for fetching packages from a `PyPI`-compatible index.
 #[derive(Debug, Clone)]
 pub struct RegistryClient {
-    /// The index URLs to use for fetching packages.
-    index_urls: IndexUrls,
+    /// The indexes to use for fetching packages.
+    indexes: IndexLocations,
     /// The strategy to use when fetching across multiple indexes.
     index_strategy: IndexStrategy,
     /// The strategy to use when selecting a PyTorch backend, if any.
@@ -301,7 +286,9 @@ impl RegistryClient {
                     .map(|indexes| indexes.map(IndexMetadataRef::from))
             })
             .map(Either::Left)
-            .unwrap_or_else(|| Either::Right(self.index_urls.indexes().map(IndexMetadataRef::from)))
+            .unwrap_or_else(|| {
+                Either::Right(self.indexes.fetch_indexes().map(IndexMetadataRef::from))
+            })
     }
 
     /// Return the appropriate [`IndexStrategy`] for the given [`PackageName`].
@@ -333,7 +320,7 @@ impl RegistryClient {
     ) -> Result<Vec<(&'index IndexUrl, MetadataFormat)>, Error> {
         // If `--no-index` is specified, avoid fetching regardless of whether the index is implicit,
         // explicit, etc.
-        if self.index_urls.no_index() {
+        if self.indexes.no_index() {
             return Err(ErrorKind::NoIndex(package_name.to_string()).into());
         }
 
@@ -353,7 +340,7 @@ impl RegistryClient {
                     match index.format {
                         IndexFormat::Simple => {
                             let status_code_strategy =
-                                self.index_urls.status_code_strategy_for(index.url);
+                                self.indexes.status_code_strategy_for(index.url);
                             match self
                                 .simple_detail_single_index(
                                     package_name,
@@ -444,6 +431,26 @@ impl RegistryClient {
         Ok(results)
     }
 
+    /// Fetch and combine entries for a package from the configured legacy `--find-links` locations.
+    #[instrument(skip_all, fields(package = % package_name))]
+    pub async fn find_links_entries(
+        &self,
+        package_name: &PackageName,
+        download_concurrency: &Semaphore,
+    ) -> Result<Vec<FlatIndexEntry>, Error> {
+        Ok(futures::stream::iter(self.indexes.flat_indexes())
+            .map(async |index| {
+                let _permit = download_concurrency.acquire().await;
+                self.flat_single_index(package_name, index.url()).await
+            })
+            .buffered(8)
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>())
+    }
+
     /// Fetch the [`FlatIndexEntry`] entries for a given package from a single `--find-links` index.
     async fn flat_single_index(
         &self,
@@ -521,7 +528,7 @@ impl RegistryClient {
         );
         let cache_control = match self.connectivity {
             Connectivity::Online => {
-                if let Some(header) = self.index_urls.simple_api_cache_control_for(index) {
+                if let Some(header) = self.indexes.simple_api_cache_control_for(index) {
                     CacheControl::Override(header)
                 } else {
                     CacheControl::from(
@@ -781,7 +788,7 @@ impl RegistryClient {
         );
         let cache_control = match self.connectivity {
             Connectivity::Online => {
-                if let Some(header) = self.index_urls.simple_api_cache_control_for(index) {
+                if let Some(header) = self.indexes.simple_api_cache_control_for(index) {
                     CacheControl::Override(header)
                 } else {
                     CacheControl::from(
@@ -1067,7 +1074,7 @@ impl RegistryClient {
             );
             let cache_control = match self.connectivity {
                 Connectivity::Online => {
-                    if let Some(header) = self.index_urls.artifact_cache_control_for(index) {
+                    if let Some(header) = self.indexes.artifact_cache_control_for(index) {
                         CacheControl::Override(header)
                     } else {
                         CacheControl::from(
@@ -1144,7 +1151,7 @@ impl RegistryClient {
         let cache_control = match self.connectivity {
             Connectivity::Online => {
                 if let Some(index) = index {
-                    if let Some(header) = self.index_urls.artifact_cache_control_for(index) {
+                    if let Some(header) = self.indexes.artifact_cache_control_for(index) {
                         CacheControl::Override(header)
                     } else {
                         CacheControl::from(
@@ -1309,7 +1316,7 @@ impl RegistryClient {
 }
 
 #[derive(Debug)]
-pub(crate) enum SimpleMetadataSearchOutcome {
+enum SimpleMetadataSearchOutcome {
     /// Simple metadata was found
     Found(OwnedArchive<SimpleDetailMetadata>),
     /// Simple metadata was not found
@@ -1454,13 +1461,6 @@ impl SimpleDetailMetadata {
         self.versions.iter()
     }
 
-    /// Return the project-level [PEP 792] status marker for this package.
-    ///
-    /// [PEP 792]: https://peps.python.org/pep-0792/
-    pub fn project_status(&self) -> &ProjectStatus {
-        &self.project_status
-    }
-
     fn from_pypi_files(
         files: Vec<uv_pypi_types::PypiFile>,
         package_name: &PackageName,
@@ -1474,11 +1474,17 @@ impl SimpleDetailMetadata {
 
         // Group the distributions by version and kind
         for file in files {
-            let Some(filename) = DistFilename::try_from_filename(&file.filename, package_name)
-            else {
-                debug!("Skipping file for {package_name}: {}", file.filename);
-                continue;
-            };
+            let filename =
+                match DistFilename::try_from_filename_with_reason(&file.filename, package_name) {
+                    Ok(filename) => filename,
+                    Err(err) => {
+                        debug!(
+                            "Skipping file for {package_name}: {:?} ({err})",
+                            file.filename
+                        );
+                        continue;
+                    }
+                };
             let file = match File::try_from_pypi(file, &base) {
                 Ok(file) => file,
                 Err(err) => {
@@ -1534,11 +1540,17 @@ impl SimpleDetailMetadata {
                     continue;
                 }
             };
-            let Some(filename) = DistFilename::try_from_filename(&file.filename, package_name)
-            else {
-                debug!("Skipping file for {package_name}: {}", file.filename);
-                continue;
-            };
+            let filename =
+                match DistFilename::try_from_filename_with_reason(&file.filename, package_name) {
+                    Ok(filename) => filename,
+                    Err(err) => {
+                        debug!(
+                            "Skipping file for {package_name}: {:?} ({err})",
+                            file.filename
+                        );
+                        continue;
+                    }
+                };
             match version_map.entry(filename.version().clone()) {
                 std::collections::btree_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().push(filename, file);
@@ -1698,18 +1710,22 @@ impl Connectivity {
 mod tests {
     use std::str::FromStr;
 
+    use tokio::sync::Semaphore;
     use url::Url;
     use uv_normalize::PackageName;
     use uv_pypi_types::PypiSimpleDetail;
     use uv_redacted::DisplaySafeUrl;
+    use uv_torch::{TorchBackend, TorchSource, TorchStrategy};
 
     use crate::{
-        BaseClientBuilder, SimpleDetailMetadata, SimpleDetailMetadatum, html::SimpleDetailHTML,
+        BaseClientBuilder, Connectivity, RegistryClient, RegistryClientBuilder,
+        SimpleDetailMetadata, SimpleDetailMetadatum, html::SimpleDetailHTML,
     };
-
-    use crate::RegistryClientBuilder;
     use uv_cache::Cache;
-    use uv_distribution_types::{FileLocation, ToUrlError};
+    use uv_distribution_types::{
+        FileLocation, Index, IndexCapabilities, IndexFormat, IndexLocations, IndexMetadataRef,
+        IndexUrl, ToUrlError,
+    };
     use uv_small_str::SmallString;
     use wiremock::matchers::{basic_auth, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1731,6 +1747,118 @@ mod tests {
             .await;
 
         server
+    }
+
+    fn no_index_client(flat_indexes: Vec<Index>) -> Result<RegistryClient, Error> {
+        Ok(
+            RegistryClientBuilder::new(BaseClientBuilder::default(), Cache::temp()?)
+                .index_locations(IndexLocations::new(vec![], flat_indexes, true))
+                .build()?,
+        )
+    }
+
+    async fn assert_no_index(
+        client: &RegistryClient,
+        package: &str,
+        index: Option<IndexMetadataRef<'_>>,
+    ) -> Result<(), Error> {
+        let error = client
+            .simple_detail(
+                &PackageName::from_str(package)?,
+                index,
+                &IndexCapabilities::default(),
+                &Semaphore::new(1),
+            )
+            .await
+            .expect_err("index lookup should be disabled");
+
+        assert!(matches!(
+            error.kind(),
+            crate::ErrorKind::NoIndex(error_package) if error_package == package
+        ));
+        Ok(())
+    }
+
+    async fn assert_no_requests(server: &MockServer) {
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("request recording should be enabled")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn no_index_disables_explicit_simple_index() -> Result<(), Error> {
+        let server = MockServer::start().await;
+        let explicit_index = IndexUrl::from_str(&format!("{}/simple", server.uri()))?;
+        let flat_index = Index::from_find_links(IndexUrl::from_str("https://example.com/flat")?);
+        let registry_client = no_index_client(vec![flat_index])?;
+
+        assert_no_index(
+            &registry_client,
+            "validation",
+            Some(IndexMetadataRef {
+                url: &explicit_index,
+                format: IndexFormat::Simple,
+            }),
+        )
+        .await?;
+        assert_no_requests(&server).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_index_disables_explicit_flat_index() -> Result<(), Error> {
+        let server = MockServer::start().await;
+        let explicit_index = IndexUrl::from_str(&server.uri())?;
+        let registry_client = no_index_client(vec![])?;
+
+        assert_no_index(
+            &registry_client,
+            "validation",
+            Some(IndexMetadataRef {
+                url: &explicit_index,
+                format: IndexFormat::Flat,
+            }),
+        )
+        .await?;
+        assert_no_requests(&server).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_index_disables_torch_simple_index() -> Result<(), Error> {
+        let flat_index_dir = tempfile::tempdir()?;
+        let flat_index = Index::from_find_links(IndexUrl::parse(
+            flat_index_dir.path().to_string_lossy().as_ref(),
+            None,
+        )?);
+        let registry_client = RegistryClientBuilder::new(
+            BaseClientBuilder::default().connectivity(Connectivity::Offline),
+            Cache::temp()?,
+        )
+        .index_locations(IndexLocations::new(vec![], vec![flat_index], true))
+        .torch_backend(Some(TorchStrategy::Backend {
+            backend: TorchBackend::Cpu,
+            source: TorchSource::PyTorch,
+        }))
+        .build()?;
+
+        assert_no_index(&registry_client, "torch", None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn simple_detail_does_not_fetch_legacy_find_links() -> Result<(), Error> {
+        let server = MockServer::start().await;
+        let flat_index = Index::from_find_links(IndexUrl::from_str(&server.uri())?);
+        let registry_client = no_index_client(vec![flat_index])?;
+
+        assert_no_index(&registry_client, "validation", None).await?;
+        assert_no_requests(&server).await;
+        Ok(())
     }
 
     #[tokio::test]

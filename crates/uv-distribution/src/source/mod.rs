@@ -50,6 +50,7 @@ use uv_workspace::pyproject::ToolUvSources;
 
 use crate::distribution_database::ManagedClient;
 use crate::error::Error;
+use crate::hash::http_hash_algorithms;
 use crate::metadata::{ArchiveMetadata, GitWorkspaceMember, Metadata};
 use crate::source::built_wheel_metadata::{BuiltWheelFile, BuiltWheelMetadata};
 use crate::source::revision::Revision;
@@ -224,10 +225,10 @@ pub(crate) const LOCAL_REVISION: &str = "revision.rev";
 pub(crate) const HASHES: &str = "hashes.msgpack";
 
 /// The name of the file that contains the cached distribution metadata, encoded via `MsgPack`.
-pub(crate) const METADATA: &str = "metadata.msgpack";
+const METADATA: &str = "metadata.msgpack";
 
 /// The directory within each entry under which to store the unpacked source distribution.
-pub(crate) const SOURCE: &str = "src";
+const SOURCE: &str = "src";
 
 impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
     /// Initialize a [`SourceDistributionBuilder`] from a [`BuildContext`].
@@ -980,7 +981,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                 // Download the source distribution.
                 debug!("Downloading source distribution: {source}");
                 let entry = cache_shard.shard(revision.id()).entry(SOURCE);
-                let algorithms = hashes.algorithms();
+                let algorithms = http_hash_algorithms(hashes);
                 let hashes = self
                     .download_archive(query_url, response, source, ext, entry.path(), &algorithms)
                     .await?;
@@ -1478,6 +1479,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                         self.build_context.locations(),
                         self.build_context.sources().clone(),
                         editable,
+                        self.build_context.cache(),
                         self.build_context.workspace_cache(),
                         credentials_cache,
                     )
@@ -1533,6 +1535,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                             self.build_context.locations(),
                             self.build_context.sources().clone(),
                             editable,
+                            self.build_context.cache(),
                             self.build_context.workspace_cache(),
                             credentials_cache,
                         )
@@ -1584,6 +1587,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                     self.build_context.locations(),
                     self.build_context.sources().clone(),
                     editable,
+                    self.build_context.cache(),
                     self.build_context.workspace_cache(),
                     credentials_cache,
                 )
@@ -1647,6 +1651,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                 self.build_context.locations(),
                 self.build_context.sources().clone(),
                 editable,
+                self.build_context.cache(),
                 self.build_context.workspace_cache(),
                 credentials_cache,
             )
@@ -1726,6 +1731,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                     self.build_context
                         .source_tree_editable_policy()
                         .workspace_member_editable(None),
+                    self.build_context.cache(),
                     self.build_context.workspace_cache(),
                     credentials_cache,
                 )
@@ -2321,6 +2327,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                             self.build_context
                                 .source_tree_editable_policy()
                                 .workspace_member_editable(None),
+                            self.build_context.cache(),
                             self.build_context.workspace_cache(),
                             credentials_cache,
                         )
@@ -2358,6 +2365,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                                 self.build_context
                                     .source_tree_editable_policy()
                                     .workspace_member_editable(None),
+                                self.build_context.cache(),
                                 self.build_context.workspace_cache(),
                                 credentials_cache,
                             )
@@ -2414,6 +2422,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                     self.build_context
                         .source_tree_editable_policy()
                         .workspace_member_editable(None),
+                    self.build_context.cache(),
                     self.build_context.workspace_cache(),
                     credentials_cache,
                 )
@@ -2479,6 +2488,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                 self.build_context
                     .source_tree_editable_policy()
                     .workspace_member_editable(None),
+                self.build_context.cache(),
                 self.build_context.workspace_cache(),
                 credentials_cache,
             )
@@ -2718,7 +2728,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
             async {
                 // Take the union of the requested and existing hash algorithms.
                 let algorithms = {
-                    let mut algorithms = hashes.algorithms();
+                    let mut algorithms = http_hash_algorithms(hashes);
                     for digest in revision.hashes() {
                         algorithms.push(digest.algorithm());
                     }
@@ -2899,6 +2909,23 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
         Ok(hashes)
     }
 
+    /// For Git directories, we check them out into the cache, so we need to avoid workspace
+    /// discovery that goes outside the cache.
+    fn stop_discovery_at<'path>(
+        source: &BuildableSource<'_>,
+        source_root: &'path Path,
+    ) -> Option<&'path Path> {
+        if matches!(
+            source,
+            BuildableSource::Dist(SourceDist::GitDirectory(_))
+                | BuildableSource::Url(SourceUrl::GitDirectory(_))
+        ) {
+            Some(source_root)
+        } else {
+            None
+        }
+    }
+
     /// Build a source distribution, storing the built wheel in the cache.
     ///
     /// Returns the un-normalized disk filename, the parsed, normalized filename and the metadata
@@ -2980,6 +3007,14 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
                 BuildKind::Wheel
             };
 
+            let install_path = if let Some(subdirectory) = subdirectory {
+                source_root.join(subdirectory)
+            } else {
+                source_root.to_path_buf()
+            };
+
+            let stop_discovery_at = Self::stop_discovery_at(source, source_root);
+
             let build_key = BuildKey {
                 base_python: base_python.into_boxed_path(),
                 source_root: source_root.to_path_buf().into_boxed_path(),
@@ -2990,7 +3025,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
             };
 
             if let Some(builder) = self.build_context.build_arena().remove(&build_key) {
-                debug!("Creating build environment for: {source}");
+                debug!("Reusing existing build environment for: {source}");
                 let wheel = builder.wheel(temp_dir.path()).await.map_err(Error::Build)?;
 
                 // Store the build context.
@@ -2998,14 +3033,15 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
 
                 wheel
             } else {
-                debug!("Reusing existing build environment for: {source}");
+                debug!("Creating build environment for: {source}");
 
                 let builder = self
                     .build_context
                     .setup_build(
                         source_root,
                         subdirectory,
-                        source_root,
+                        &install_path,
+                        stop_discovery_at,
                         Some(&source.to_string()),
                         source.as_dist(),
                         &no_sources,
@@ -3124,13 +3160,22 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
             BuildKind::Wheel
         };
 
+        let install_path = if let Some(subdirectory) = subdirectory {
+            source_root.join(subdirectory)
+        } else {
+            source_root.to_path_buf()
+        };
+
+        let stop_discovery_at = Self::stop_discovery_at(source, source_root);
+
         // Set up the builder.
         let mut builder = self
             .build_context
             .setup_build(
                 source_root,
                 subdirectory,
-                source_root,
+                &install_path,
+                stop_discovery_at,
                 Some(&source.to_string()),
                 source.as_dist(),
                 &no_sources,
@@ -3516,7 +3561,7 @@ impl LocalRevisionPointer {
     }
 
     /// Return the [`Revision`] for the pointer.
-    pub(crate) fn revision(&self) -> &Revision {
+    fn revision(&self) -> &Revision {
         &self.revision
     }
 

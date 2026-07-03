@@ -38,11 +38,6 @@ impl Reinstall {
         matches!(self, Self::None)
     }
 
-    /// Returns `true` if all packages should be reinstalled.
-    pub fn is_all(&self) -> bool {
-        matches!(self, Self::All)
-    }
-
     /// Returns `true` if the specified package should be reinstalled.
     pub fn contains_package(&self, package_name: &PackageName) -> bool {
         match self {
@@ -153,14 +148,22 @@ pub struct Upgrade {
 
     /// Additional version constraints for specific packages.
     constraints: FxHashMap<PackageName, Vec<Requirement>>,
+
+    /// Packages explicitly named via `--upgrade-package` (with or without a version specifier).
+    ///
+    /// Preserved separately from `strategy` and `constraints` so that explicit upgrade targets
+    /// can be recovered even when the broader strategy is [`UpgradeStrategy::All`] (i.e., when
+    /// `--upgrade` was passed alongside `--upgrade-package`).
+    explicit_targets: FxHashSet<PackageName>,
 }
 
 impl Upgrade {
     /// Create a new [`Upgrade`] with no upgrades nor constraints.
-    pub fn none() -> Self {
+    fn none() -> Self {
         Self {
             strategy: UpgradeStrategy::None,
             constraints: FxHashMap::default(),
+            explicit_targets: FxHashSet::default(),
         }
     }
 
@@ -169,6 +172,7 @@ impl Upgrade {
         Self {
             strategy: UpgradeStrategy::All,
             constraints: FxHashMap::default(),
+            explicit_targets: FxHashSet::default(),
         }
     }
 
@@ -200,13 +204,16 @@ impl Upgrade {
             }
         };
 
+        let explicit_targets: FxHashSet<PackageName> =
+            upgrade_package.iter().map(|req| req.name.clone()).collect();
+
         let mut constraints: FxHashMap<PackageName, Vec<Requirement>> = FxHashMap::default();
         for requirement in upgrade_package {
             // Skip any "empty" constraints.
-            if let RequirementSource::Registry { specifier, .. } = &requirement.source {
-                if specifier.is_empty() {
-                    continue;
-                }
+            if let RequirementSource::Registry { specifier, .. } = &requirement.source
+                && specifier.is_empty()
+            {
+                continue;
             }
             constraints
                 .entry(requirement.name.clone())
@@ -217,16 +224,20 @@ impl Upgrade {
         Some(Self {
             strategy,
             constraints,
+            explicit_targets,
         })
     }
 
     /// Create an [`Upgrade`] to upgrade a single package.
     pub fn package(package_name: PackageName) -> Self {
         let mut packages = FxHashSet::default();
-        packages.insert(package_name);
+        packages.insert(package_name.clone());
+        let mut explicit_targets = FxHashSet::default();
+        explicit_targets.insert(package_name);
         Self {
             strategy: UpgradeStrategy::Some(packages, FxHashSet::default()),
             constraints: FxHashMap::default(),
+            explicit_targets,
         }
     }
 
@@ -254,6 +265,47 @@ impl Upgrade {
         match &self.strategy {
             UpgradeStrategy::Some(packages, _) => Some(packages),
             _ => None,
+        }
+    }
+
+    /// Returns the set of explicitly named `--upgrade-package` targets, regardless of the
+    /// current strategy. This includes targets that have no version specifier (which are not
+    /// recorded in [`Self::constraints`]).
+    pub fn explicit_targets(&self) -> &FxHashSet<PackageName> {
+        &self.explicit_targets
+    }
+
+    /// Restrict an "upgrade all" strategy to only the given packages, matching pip's
+    /// `--upgrade-strategy only-if-needed` semantics.
+    ///
+    /// # Preconditions
+    ///
+    /// The current strategy must be [`UpgradeStrategy::All`]. The other variants do not have
+    /// a well-defined meaning for "narrow to only-if-needed": [`UpgradeStrategy::None`] is
+    /// already a no-op (nothing should be upgraded), and [`UpgradeStrategy::Some`] has
+    /// already been narrowed by the user (e.g., via `--no-upgrade --upgrade-package foo`)
+    /// and `only-if-needed` semantics should not broaden it.
+    ///
+    /// The resulting strategy is [`UpgradeStrategy::Some`] containing the provided package
+    /// names as well as any packages already named via `--upgrade-package`, so that explicit
+    /// upgrade targets are preserved.
+    #[must_use]
+    pub fn into_only_if_needed(self, packages: &[PackageName]) -> Self {
+        debug_assert!(
+            matches!(self.strategy, UpgradeStrategy::All),
+            "into_only_if_needed expects an `All` strategy; callers must check `is_all()` \
+             before calling this method",
+        );
+        if matches!(self.strategy, UpgradeStrategy::All) {
+            let mut combined: FxHashSet<PackageName> = packages.iter().cloned().collect();
+            combined.extend(self.explicit_targets.iter().cloned());
+            Self {
+                strategy: UpgradeStrategy::Some(combined, FxHashSet::default()),
+                constraints: self.constraints,
+                explicit_targets: self.explicit_targets,
+            }
+        } else {
+            self
         }
     }
 
@@ -293,9 +345,14 @@ impl Upgrade {
                 .extend(requirements);
         }
 
+        // For `explicit_targets`: always merge.
+        let mut combined_explicit_targets = self.explicit_targets;
+        combined_explicit_targets.extend(other.explicit_targets);
+
         Self {
             strategy,
             constraints: combined_constraints,
+            explicit_targets: combined_explicit_targets,
         }
     }
 }

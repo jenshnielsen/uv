@@ -45,7 +45,7 @@ use uv_shell::WindowsRunnable;
 use uv_static::EnvVars;
 use uv_types::SourceTreeEditablePolicy;
 use uv_warnings::warn_user;
-use uv_workspace::{DiscoveryOptions, VirtualProject, WorkspaceCache, WorkspaceError};
+use uv_workspace::{DiscoveryOptions, VirtualProject, WorkspaceCache, WorkspaceErrorKind};
 
 use crate::child::run_to_completion;
 
@@ -68,8 +68,8 @@ use crate::commands::project::install_target::InstallTarget;
 use crate::commands::project::lock::LockMode;
 use crate::commands::project::lock_target::LockTarget;
 use crate::commands::project::{
-    EnvironmentSpecification, PreferenceLocation, ProjectEnvironment, ProjectError,
-    ScriptEnvironment, ScriptInterpreter, UniversalState, WorkspacePython,
+    EnvironmentSpecification, LinkErrorReporting, PreferenceLocation, ProjectEnvironment,
+    ProjectError, ScriptEnvironment, ScriptInterpreter, UniversalState, WorkspacePython,
     default_dependency_groups, script_extra_build_requires, script_specification,
     update_environment, validate_project_requires_python,
 };
@@ -216,7 +216,6 @@ pub(crate) async fn run(
                 &cache,
                 DryRun::Disabled,
                 printer,
-                preview,
             )
             .await?
             .into_environment()?;
@@ -387,7 +386,6 @@ pub(crate) async fn run(
                     &cache,
                     DryRun::Disabled,
                     printer,
-                    preview,
                 )
                 .await?
                 .into_environment()?;
@@ -473,7 +471,6 @@ pub(crate) async fn run(
                     active.map_or(Some(false), Some),
                     &cache,
                     printer,
-                    preview,
                 )
                 .await?
                 .into_interpreter();
@@ -543,6 +540,7 @@ pub(crate) async fn run(
             let project = VirtualProject::discover_with_package(
                 project_dir,
                 &DiscoveryOptions::default(),
+                &cache,
                 workspace_cache,
                 package.clone(),
             )
@@ -552,6 +550,7 @@ pub(crate) async fn run(
             match VirtualProject::discover(
                 project_dir,
                 &DiscoveryOptions::default(),
+                &cache,
                 workspace_cache,
             )
             .await
@@ -564,20 +563,24 @@ pub(crate) async fn run(
                         Some(project)
                     }
                 }
-                Err(WorkspaceError::MissingPyprojectToml | WorkspaceError::NonWorkspace(_)) => {
-                    // If the user runs with `--no-project` and we can't find a project, warn.
-                    if no_project {
-                        warn!("`--no-project` was provided, but no project was found");
-                    }
-                    None
-                }
                 Err(err) => {
-                    // If the user runs with `--no-project`, ignore the error.
-                    if no_project {
-                        warn!("Ignoring project discovery error due to `--no-project`: {err}");
+                    if matches!(
+                        err.as_ref(),
+                        WorkspaceErrorKind::MissingPyprojectToml
+                            | WorkspaceErrorKind::NonWorkspace(_)
+                    ) {
+                        if no_project {
+                            warn!("`--no-project` was provided, but no project was found");
+                        }
                         None
                     } else {
-                        return Err(err.into());
+                        // If the user runs with `--no-project`, ignore the error.
+                        if no_project {
+                            warn!("Ignoring project discovery error due to `--no-project`: {err}");
+                            None
+                        } else {
+                            return Err(err.into());
+                        }
                     }
                 }
             }
@@ -665,7 +668,6 @@ pub(crate) async fn run(
                     install_mirrors.python_install_mirror.as_deref(),
                     install_mirrors.pypy_install_mirror.as_deref(),
                     install_mirrors.python_downloads_json_url.as_deref(),
-                    preview,
                 )
                 .await?
                 .into_interpreter();
@@ -710,8 +712,8 @@ pub(crate) async fn run(
                     active,
                     &cache,
                     DryRun::Disabled,
+                    LinkErrorReporting::Log,
                     printer,
-                    preview,
                 )
                 .await?
                 .into_environment()?
@@ -907,7 +909,6 @@ pub(crate) async fn run(
                     install_mirrors.python_install_mirror.as_deref(),
                     install_mirrors.pypy_install_mirror.as_deref(),
                     install_mirrors.python_downloads_json_url.as_deref(),
-                    preview,
                 )
                 .await?;
 
@@ -1354,6 +1355,8 @@ fn can_skip_ephemeral(
         &spec.requirements,
         &spec.constraints,
         &spec.overrides,
+        &spec.override_dependencies,
+        &spec.excludes,
         InstallationStrategy::Permissive,
         &markers,
         tags,
@@ -1835,7 +1838,7 @@ impl RunCommand {
     }
 
     /// Return the directory containing the script, if any.
-    pub(crate) fn script_dir(&self) -> Option<&Path> {
+    fn script_dir(&self) -> Option<&Path> {
         let parent = match self {
             Self::PythonScript(target, _)
             | Self::PythonGuiScript(target, _)
@@ -2161,8 +2164,8 @@ fn copy_entrypoint(
 #[derive(Debug, thiserror::Error)]
 #[error("`uv run` was recursively invoked {depth} times which exceeds the limit of {max}")]
 pub(crate) struct RecursionLimitError {
-    pub(crate) depth: u32,
-    pub(crate) max: u32,
+    depth: u32,
+    max: u32,
 }
 
 impl uv_errors::Hint for RecursionLimitError {

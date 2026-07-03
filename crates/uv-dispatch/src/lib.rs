@@ -19,7 +19,7 @@ use uv_client::RegistryClient;
 use uv_configuration::{
     BuildKind, BuildOptions, Constraints, IndexStrategy, NoSources, Overrides, Reinstall,
 };
-use uv_configuration::{BuildOutput, Concurrency};
+use uv_configuration::{BuildOutput, Concurrency, Excludes};
 use uv_distribution::DistributionDatabase;
 use uv_distribution_filename::DistFilename;
 use uv_distribution_types::{
@@ -294,10 +294,12 @@ impl BuildContext for BuildDispatch<'_> {
             .augment_with_requirements(requirements.iter())
             .map_err(uv_requirements::Error::from)?;
         let overrides = Overrides::default();
+        let excludes = Excludes::default();
         let (lookaheads, hasher) = LookaheadResolver::new(
             requirements,
             self.constraints,
             &overrides,
+            &excludes,
             &hasher,
             &self.shared_state.index,
             DistributionDatabase::new(
@@ -491,6 +493,7 @@ impl BuildContext for BuildDispatch<'_> {
         source: &'data Path,
         subdirectory: Option<&'data Path>,
         install_path: &'data Path,
+        stop_discovery_at: Option<&'data Path>,
         version_id: Option<&'data str>,
         dist: Option<&'data SourceDist>,
         sources: &'data NoSources,
@@ -554,6 +557,7 @@ impl BuildContext for BuildDispatch<'_> {
             source,
             subdirectory,
             install_path,
+            stop_discovery_at,
             dist_name,
             dist_version,
             self.interpreter,
@@ -688,15 +692,5 @@ impl SharedState {
     /// Return the [`InFlight`] used by the [`SharedState`].
     pub fn in_flight(&self) -> &InFlight {
         &self.in_flight
-    }
-
-    /// Return the [`IndexCapabilities`] used by the [`SharedState`].
-    pub fn capabilities(&self) -> &IndexCapabilities {
-        &self.capabilities
-    }
-
-    /// Return the [`BuildArena`] used by the [`SharedState`].
-    pub fn build_arena(&self) -> &BuildArena<SourceBuild> {
-        &self.build_arena
     }
 }

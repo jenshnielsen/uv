@@ -1,6 +1,6 @@
 [package]
 name = "uv-bench"
-version = "0.0.51"
+version = "0.0.59"
 description = "This is an internal component crate of uv"
 publish = false
 authors = { workspace = true }
@@ -23,6 +23,11 @@ name = "uv"
 path = "benches/uv.rs"
 harness = false
 
+[[bench]]
+name = "workspace_discovery"
+path = "benches/workspace_discovery.rs"
+harness = false
+
 [dev-dependencies]
 uv-cache = { workspace = true }
 uv-client = { workspace = true }
@@ -35,6 +40,7 @@ uv-extract = { workspace = true }
 uv-install-wheel = { workspace = true }
 uv-pep440 = { workspace = true }
 uv-pep508 = { workspace = true }
+uv-performance-memory-allocator = { workspace = true }
 uv-platform-tags = { workspace = true }
 uv-preview = { workspace = true }
 uv-pypi-types = { workspace = true }
@@ -54,6 +60,7 @@ jiff = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+toml = { workspace = true }
 
 [features]
 static = ["uv-extract/static"]

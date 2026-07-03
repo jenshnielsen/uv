@@ -13,8 +13,8 @@ use tracing::debug;
 use uv_cache::Cache;
 use uv_client::{BaseClientBuilder, RegistryClient};
 use uv_configuration::{
-    BuildOptions, Concurrency, Constraints, DependencyGroups, DryRun, Excludes,
-    ExtrasSpecification, Overrides, Reinstall, Upgrade,
+    BuildOptions, Concurrency, Constraints, DependencyGroups, DryRun, ExcludeDependency, Excludes,
+    ExtrasSpecification, Override, Overrides, Reinstall, Upgrade,
 };
 use uv_dispatch::BuildDispatch;
 use uv_distribution::{DistributionDatabase, SourcedDependencyGroups};
@@ -100,7 +100,8 @@ pub(crate) async fn resolve<InstalledPackages: InstalledPackagesProvider>(
     requirements: Vec<UnresolvedRequirementSpecification>,
     constraints: Vec<NameRequirementSpecification>,
     overrides: Vec<UnresolvedRequirementSpecification>,
-    excludes: Vec<PackageName>,
+    lowered_overrides: Vec<Override<Requirement>>,
+    excludes: Vec<ExcludeDependency>,
     source_trees: Vec<SourceTree>,
     mut project: Option<PackageName>,
     workspace_members: BTreeSet<PackageName>,
@@ -219,6 +220,7 @@ pub(crate) async fn resolve<InstalledPackages: InstalledPackagesProvider>(
                 None,
                 build_dispatch.locations(),
                 build_dispatch.sources().clone(),
+                build_dispatch.cache(),
                 build_dispatch.workspace_cache(),
                 client.credentials_cache(),
             )
@@ -233,7 +235,7 @@ pub(crate) async fn resolve<InstalledPackages: InstalledPackagesProvider>(
             // Complain if dependency groups are named that don't appear.
             for name in groups.explicit_names() {
                 if !metadata.dependency_groups.contains_key(name) {
-                    return Err(anyhow!(
+                    Err(anyhow!(
                         "The dependency group '{name}' was not found in the project: {}",
                         pyproject_path.user_display()
                     ))?;
@@ -305,8 +307,14 @@ pub(crate) async fn resolve<InstalledPackages: InstalledPackagesProvider>(
             .map(|constraint| constraint.requirement)
             .chain(upgrade.constraints().cloned()),
     );
-    let overrides = Overrides::from_requirements(overrides);
-    let excludes = excludes.into_iter().collect::<Excludes>();
+    let overrides = Overrides::from_entries(
+        lowered_overrides
+            .into_iter()
+            .chain(overrides.into_iter().map(Override::Requirement))
+            .collect(),
+    )
+    .map_err(anyhow::Error::from)?;
+    let excludes = Excludes::from_entries(excludes);
     let preferences = Preferences::from_iter(preferences, &resolver_env);
 
     // Determine any lookahead requirements.
@@ -316,6 +324,7 @@ pub(crate) async fn resolve<InstalledPackages: InstalledPackagesProvider>(
                 &requirements,
                 &constraints,
                 &overrides,
+                &excludes,
                 &hasher,
                 index,
                 DistributionDatabase::new(
@@ -1141,7 +1150,7 @@ impl uv_errors::Hint for Error {
     "Requesting extras requires a `pylock.toml`, `pyproject.toml`, `setup.cfg`, or `setup.py` file"
 )]
 pub(crate) struct ExtrasWithoutSourceError {
-    pub(crate) has_editable: bool,
+    has_editable: bool,
 }
 
 impl uv_errors::Hint for ExtrasWithoutSourceError {

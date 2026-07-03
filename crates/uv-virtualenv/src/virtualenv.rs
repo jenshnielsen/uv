@@ -150,14 +150,7 @@ pub(crate) fn create(
                         }
                     }
                     debug!("Removing existing {name} ({reason})");
-                    // Before removing the virtual environment, we need to canonicalize the path
-                    // because `Path::metadata` will follow the symlink but we're still operating on
-                    // the unresolved path and will remove the symlink itself.
-                    let location = location
-                        .canonicalize()
-                        .unwrap_or_else(|_| location.to_path_buf());
-                    uv_fs::remove_virtualenv(&location)?;
-                    fs_err::create_dir_all(&location)?;
+                    uv_fs::clear_virtualenv(location)?;
                 }
                 OnExisting::Fail => return err,
                 // If not a virtual environment, fail without prompting.
@@ -166,14 +159,7 @@ pub(crate) fn create(
                     match confirm_clear(location, name)? {
                         Some(true) => {
                             debug!("Removing existing {name} due to confirmation");
-                            // Before removing the virtual environment, we need to canonicalize the
-                            // path because `Path::metadata` will follow the symlink but we're still
-                            // operating on the unresolved path and will remove the symlink itself.
-                            let location = location
-                                .canonicalize()
-                                .unwrap_or_else(|_| location.to_path_buf());
-                            uv_fs::remove_virtualenv(&location)?;
-                            fs_err::create_dir_all(&location)?;
+                            uv_fs::clear_virtualenv(location)?;
                         }
                         Some(false) => return err,
                         // When we don't have a TTY, require `--clear` explicitly.
@@ -488,7 +474,7 @@ pub(crate) fn create(
             }
             (true, "activate.bat") => r"%~dp0..".to_string(),
             (true, "activate.fish") => {
-                r#"'"$(dirname -- "$(cd "$(dirname -- "$(status -f)")"; and pwd)")"'"#.to_string()
+                r"'(dirname -- (dirname -- (realpath -- (status -f))))'".to_string()
             }
             (true, "activate.nu") => r"(path self | path dirname | path dirname)".to_string(),
             (false, "activate.nu") => {
@@ -528,7 +514,11 @@ pub(crate) fn create(
         ("uv".to_string(), version().to_string()),
         (
             "version_info".to_string(),
-            interpreter.markers().python_full_version().string.clone(),
+            if using_minor_version_link {
+                interpreter.python_minor_version().to_string()
+            } else {
+                interpreter.markers().python_full_version().string.clone()
+            },
         ),
         (
             "include-system-site-packages".to_string(),

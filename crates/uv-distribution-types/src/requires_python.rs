@@ -530,7 +530,7 @@ pub struct RequiresPythonRange(LowerBound, UpperBound);
 
 impl RequiresPythonRange {
     /// Initialize a [`RequiresPythonRange`] from a [`Range`].
-    pub fn from_range(range: &Ranges<Version>) -> Self {
+    fn from_range(range: &Ranges<Version>) -> Self {
         let (lower, upper) = range
             .bounding_range()
             .map(|(lower_bound, upper_bound)| (lower_bound.cloned(), upper_bound.cloned()))
@@ -554,7 +554,7 @@ impl RequiresPythonRange {
     }
 
     /// Returns the [`VersionSpecifiers`] for the range.
-    pub fn specifiers(&self) -> VersionSpecifiers {
+    fn specifiers(&self) -> VersionSpecifiers {
         [self.0.specifier(), self.1.specifier()]
             .into_iter()
             .flatten()
@@ -611,6 +611,11 @@ impl SimplifiedMarkerTree {
     /// Returns the underlying marker tree without re-complexifying them.
     pub fn as_simplified_marker_tree(self) -> MarkerTree {
         self.0
+    }
+
+    /// Combine this simplified marker with another via a conjunction.
+    pub fn and(&mut self, marker: Self) {
+        self.0.and(marker.0);
     }
 }
 

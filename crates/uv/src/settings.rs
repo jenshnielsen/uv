@@ -20,8 +20,7 @@ use uv_cli::{
     PythonListFormat, PythonPinArgs, PythonUninstallArgs, PythonUpgradeArgs, RemoveArgs, RunArgs,
     SyncArgs, SyncFormat, ToolDirArgs, ToolInstallArgs, ToolListArgs, ToolRunArgs,
     ToolUninstallArgs, TreeArgs, UpgradeArgs, UpgradeStrategy, VenvArgs, VersionArgs,
-    VersionBumpSpec,
-    VersionFormat,
+    VersionBumpSpec, VersionFormat,
 };
 use uv_cli::{
     AuthorFrom, BuildArgs, CheckArgs, ExportArgs, FormatArgs, PublishArgs, PythonDirArgs,
